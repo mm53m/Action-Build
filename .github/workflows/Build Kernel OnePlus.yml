@@ -1173,6 +1173,16 @@ jobs:
             set_config "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
             # SUSFS v2.4.0 新增：隐藏 uid>=10000 进程的 getpriority/setpriority/ioprio
             set_config "CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=y"
+            # 系统调用钩子后端：优先 SUSFS Inline（直接入口点，无 tracepoint 事件可被观测）；
+            # 老补丁集没有这个 choice 就保持 Kconfig 默认的 Tracepoint。
+            if grep -q 'config KSU_HOOK_SUSFS_INLINE' \
+                 "$GITHUB_WORKSPACE/kernel_workspace/FinaSU/kernel/Kconfig"; then
+              set_config "CONFIG_KSU_HOOK_SUSFS_INLINE=y"
+              set_config "CONFIG_KSU_HOOK_TRACEPOINT=n"
+              echo "钩子后端：选择 SUSFS Inline（CONFIG_KSU_HOOK_SUSFS_INLINE=y）"
+            else
+              echo "::warning title=钩子后端::当前 FinaSU 没有 KSU_HOOK_SUSFS_INLINE 选项，保持 Tracepoint"
+            fi
           else
             set_config "CONFIG_KSU_SUSFS=n"
           fi
@@ -1579,8 +1589,12 @@ jobs:
             fi
             if grep -qxE 'CONFIG_KSU_HOOK_SUSFS_INLINE=y' out/.config; then
               echo "  ok  hook 后端 = SUSFS Inline"
+            elif grep -q 'config KSU_HOOK_SUSFS_INLINE' \
+                 "$GITHUB_WORKSPACE/kernel_workspace/FinaSU/kernel/Kconfig"; then
+              echo "::error title=hook 后端::本轮要求 SUSFS Inline，但 .config 里没选中（choice 被 olddefconfig 改回？）"
+              cfg_fail=1
             elif grep -qxE 'CONFIG_KSU_HOOK_TRACEPOINT=y' out/.config; then
-              echo "  warn hook 后端 = Tracepoint（功能等价，检测面更大）"
+              echo "  warn hook 后端 = Tracepoint（该 FinaSU 无 Inline 选项，功能等价但检测面更大）"
             else
               echo "::error title=hook 后端::既未选中 SUSFS Inline 也未选中 Tracepoint"
               cfg_fail=1
@@ -1591,6 +1605,14 @@ jobs:
             exit 1
           fi
           echo "✅ 编译期配置断言全部通过"
+
+          # 选 Inline 时先跑 FinaSU 自带的入口点检查（Kbuild 里也会跑一次，这里让它早点失败并留日志）：
+          # 12 个 ksu_handle_* 调用点必须都在 fs/exec.c、fs/open.c、fs/read_write.c、fs/stat.c、
+          # kernel/reboot.c、kernel/sys.c、drivers/input/input.c 里，且不能残留 MANUAL_HOOK 老钩子。
+          if grep -qxE 'CONFIG_KSU_HOOK_SUSFS_INLINE=y' out/.config; then
+            sh "$GITHUB_WORKSPACE/kernel_workspace/FinaSU/kernel/tools/check_susfs_inline.sh" "$PWD"
+            echo "✅ SUSFS Inline 入口点检查通过（12 个调用点齐备，无冲突钩子）"
+          fi
 
           make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}"
 
