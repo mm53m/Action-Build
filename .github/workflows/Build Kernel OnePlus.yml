@@ -878,6 +878,24 @@ jobs:
           source $REJ_CHECKER
           check_rejects .
 
+      - name: Enable Dual-Policy SELinux Hide
+        if: ${{ github.event.inputs.SUSFS_META != '-1' }}
+        run: |
+          # SUSFS 的 50_add 只接管「写策略节点」的外壳（uid>=10000 && running 才走
+          # susfs_*），而它那几个函数是按 live policy 回答的 —— live policy 里已经
+          # 有 KernelSU 注入的 ksu_file / su 规则，于是 App Zygote 域（DirtySepolicy /
+          # Duck Detector）能用 security:check_context / security:compute_av /
+          # process:setcurrent 三条 oracle 把注入规则原样读出来。
+          #
+          # FinaSU 自己保留着双策略实现（my_write_context / my_write_access /
+          # my_setprocattr，用 backup_sepolicy 即注入前的策略回答），但在
+          # CONFIG_KSU_SUSFS 下被编译成无人调用的导出函数。这一步把三个外壳接到
+          # 它们上面：门控不变、SUSFS 其它功能（sus_path/sus_mount/sus_kstat/
+          # avc log 伪装/伪 status 页）全部保留，只是回答查询时改用原始策略。
+          python3 "${GITHUB_WORKSPACE}/kernel_workspace/Action-Build/scripts/patch-selinux-hide-dual-policy.py" \
+            "${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common" \
+            "${GITHUB_WORKSPACE}/kernel_workspace/FinaSU"
+
       - name: Revert and Postfix Fake Patches
         if: ${{ github.event.inputs.SUSFS_META != '-1' }}
         run: |
