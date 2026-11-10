@@ -878,20 +878,27 @@ jobs:
           source $REJ_CHECKER
           check_rejects .
 
-      - name: Enable Dual-Policy SELinux Hide
+      - name: Adapt SELinux Hiding (SUSFS 2.4 native registration, legacy fallback)
         if: ${{ github.event.inputs.SUSFS_META != '-1' }}
         run: |
-          # SUSFS 的 50_add 只接管「写策略节点」的外壳（uid>=10000 && running 才走
-          # susfs_*），而它那几个函数是按 live policy 回答的 —— live policy 里已经
-          # 有 KernelSU 注入的 ksu_file / su 规则，于是 App Zygote 域（DirtySepolicy /
-          # Duck Detector）能用 security:check_context / security:compute_av /
-          # process:setcurrent 三条 oracle 把注入规则原样读出来。
+          # 三条策略 oracle（security:check_context / security:compute_av /
+          # process:setcurrent）在 App Zygote 域里能把注入的 ksu_file / su 规则
+          # 问出来 —— 具体走哪条隐藏路径取决于 SUSFS 的版本形态：
           #
-          # FinaSU 自己保留着双策略实现（my_write_context / my_write_access /
-          # my_setprocattr，用 backup_sepolicy 即注入前的策略回答），但在
-          # CONFIG_KSU_SUSFS 下被编译成无人调用的导出函数。这一步把三个外壳接到
-          # 它们上面：门控不变、SUSFS 其它功能（sus_path/sus_mount/sus_kstat/
-          # avc log 伪装/伪 status 页）全部保留，只是回答查询时改用原始策略。
+          #   A) SUSFS >= v2.4.0 + FinaSU >= a49dd71e（当前形态）：
+          #      FinaSU 注入类型/allow 时调用 susfs_add_sus_type() 与
+          #      susfs_add_sus_avd_allowed_by_type() 登记「注入前的样子」，
+          #      SUSFS 自己的查询钩子据此判 sus 类型不存在、并把 allowed 位还原，
+          #      此时**保持 SUSFS 原生实现不动**（上游设计要求，latest_granting
+          #      也不再递增、avc 用 seqno 0 重置）。
+          #
+          #   B) 旧补丁形态（SUSFS < 2.4 或 FinaSU 无注册调用点）：
+          #      SUSFS 外壳按 live policy 回答会泄漏，脚本把三个外壳委托给
+          #      FinaSU 的双策略实现（my_write_context / my_write_access /
+          #      my_setprocattr，按 backup_sepolicy 回答）。
+          #
+          # 脚本自己探测并二选一，SUSFS 其它功能（sus_path/sus_mount/sus_kstat/
+          # avc log 伪装/伪 status 页）不受影响。
           python3 "${GITHUB_WORKSPACE}/kernel_workspace/Action-Build/scripts/patch-selinux-hide-dual-policy.py" \
             "${GITHUB_WORKSPACE}/kernel_workspace/kernel_platform/common" \
             "${GITHUB_WORKSPACE}/kernel_workspace/FinaSU"
@@ -1164,6 +1171,8 @@ jobs:
             set_config "CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS=y"
             set_config "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y"
             set_config "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y"
+            # SUSFS v2.4.0 新增：隐藏 uid>=10000 进程的 getpriority/setpriority/ioprio
+            set_config "CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER=y"
           else
             set_config "CONFIG_KSU_SUSFS=n"
           fi
@@ -1563,6 +1572,11 @@ jobs:
                      CONFIG_KSU_SUSFS_OPEN_REDIRECT; do
               assert_cfg out/.config "$k" "SUSFS 功能项" || cfg_fail=1
             done
+            # SUSFS 2.4 才有的选项：Kconfig 里存在就必须为 y（不存在则跳过，兼容旧补丁）
+            if grep -q 'config KSU_SUSFS_PRIORITY_UID_FILTER' \
+                 "$GITHUB_WORKSPACE/kernel_workspace/FinaSU/kernel/Kconfig"; then
+              assert_cfg out/.config CONFIG_KSU_SUSFS_PRIORITY_UID_FILTER "SUSFS 2.4 UID 过滤" || cfg_fail=1
+            fi
             if grep -qxE 'CONFIG_KSU_HOOK_SUSFS_INLINE=y' out/.config; then
               echo "  ok  hook 后端 = SUSFS Inline"
             elif grep -qxE 'CONFIG_KSU_HOOK_TRACEPOINT=y' out/.config; then
