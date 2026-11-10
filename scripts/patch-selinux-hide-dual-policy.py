@@ -101,6 +101,17 @@ def find_function(lines, hint):
     return sig, brace, end
 
 
+def old_form_patch(root):
+    """老形态（<=8930474a）的 50_add 补丁自带 my_setprocattr 调用，已经走双策略。"""
+    hooks = root / "security/selinux/hooks.c"
+    fs = root / "security/selinux/selinuxfs.c"
+    if not hooks.exists() or not fs.exists():
+        return False
+    hook_text = hooks.read_text()
+    return ("fake_state" in fs.read_text()) or ("susfs_sel_write_context" not in fs.read_text()
+                                               and "my_setprocattr(" in hook_text)
+
+
 def patch_file(root, spec):
     path = root / spec["file"]
     if not path.exists():
@@ -110,6 +121,10 @@ def patch_file(root, spec):
 
     found = find_function(lines, spec["signature_hint"])
     if found is None:
+        if old_form_patch(root):
+            print("  = 老形态补丁（my_setprocattr/&fake_state）：外壳已直接调用 KSU 双策略，跳过 %s"
+                  % spec["func"])
+            return False
         fail("%s: 找不到函数 %s 的定义，上游形态已变更，需人工确认"
              % (spec["file"], spec["func"]))
     sig, brace, end = found
