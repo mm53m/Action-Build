@@ -68,7 +68,9 @@ need_grep "$COMMON/security/selinux/avc.c" \
   "avc.c: avc 日志 tsid 可伪装"
 
 # —— 老补丁（2026-10-29 之前形态）专用：setprocattr 走 my_setprocattr ——
-if grep -q 'my_setprocattr' "$COMMON/security/selinux/hooks.c" 2>/dev/null; then
+# 判据必须用 fake_state / susfs_selinux_setprocattr，不能用 my_setprocattr：
+# 双策略接线脚本会往 hooks.c 插 `extern int my_setprocattr(...)`，用它判形态会误判。
+if grep -q 'fake_state' "$COMMON/security/selinux/selinuxfs.c" 2>/dev/null; then
   need_grep "$COMMON/security/selinux/hooks.c" 'my_setprocattr' "hooks.c: my_setprocattr 形态（老补丁）"
   need_grep "$COMMON/security/selinux/selinuxfs.c" 'fake_state' \
     "selinuxfs.c: 引用 fake_state（老补丁伪策略）"
@@ -100,6 +102,9 @@ check_delegated() { # file func callee desc
     err "$4: $2 仍用 live policy 回答（未接入 $3，App Zygote 侧信道可读出 ksu 规则）"
   fi
 }
+if ! grep -q 'susfs_sel_write_context' "$COMMON/security/selinux/selinuxfs.c" 2>/dev/null; then
+  echo "  warn 老形态补丁（my_setprocattr/&fake_state）：外壳直接调用 KSU 双策略，跳过委托检查"
+else
 check_delegated "$COMMON/security/selinux/selinuxfs.c" susfs_sel_write_context my_write_context "check_context oracle"
 check_delegated "$COMMON/security/selinux/selinuxfs.c" susfs_sel_write_access  my_write_access  "compute_av oracle"
 check_delegated "$COMMON/security/selinux/hooks.c"      susfs_selinux_setprocattr my_setprocattr "setcurrent oracle"
@@ -115,6 +120,7 @@ fi
 if body_of "$COMMON/security/selinux/hooks.c" susfs_selinux_setprocattr \
      | grep -q 'susfs_security_context_to_sid('; then
   err "hooks.c: susfs_selinux_setprocattr 仍调用 susfs_security_context_to_sid（live policy 泄漏）"
+fi
 fi
 
 echo "== 2. FinaSU 驱动侧符号导出（CONFIG_KSU_SUSFS 分支） =="
