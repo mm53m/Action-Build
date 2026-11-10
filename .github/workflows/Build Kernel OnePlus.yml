@@ -755,7 +755,9 @@ jobs:
           if [ "${{ github.event.inputs.SUSFS_META }}" != "-1" ]; then
             echo "正在拉取susfs补丁"
             cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.KANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
-            cp ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ../FinaSU/
+            # 注意：不再使用 susfs4ksu 的 10_enable_susfs_for_ksu.patch
+            # 它针对 tiann/KernelSU 旧布局：会删掉 FinaSU 仍在用的 ksu_app_profile_init 声明
+            # 并回退 #3629 的 6.6 backport 适配；FinaSU 已自带 kernel/extension/susfs.c + CONFIG_KSU_SUSFS
             cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
             cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
           fi
@@ -768,14 +770,7 @@ jobs:
             cp -r ../SukiSU_patch/other/zram/lz4k_oplus ./common/lib/
           fi
 
-          if [ "${{ github.event.inputs.SUSFS_META }}" != "-1" ]; then
-            cd ../FinaSU
-            sed -i 's|kernel/Makefile|kernel/Kbuild|g' ./10_enable_susfs_for_ksu.patch
-            patch -p1 < 10_enable_susfs_for_ksu.patch || true
-            cd ../kernel_platform/common
-          else
-            cd ./common
-          fi
+          cd ./common
 
           if [ "$KMI" == "android13-5.15" ] && [ "$SUBLEVEL" -lt 123 ]; then
             echo "修复内核版本为5.15.0~5.15.123仅支持旧版C库造成的一些bug"
