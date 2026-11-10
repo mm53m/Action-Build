@@ -221,8 +221,10 @@ if [ -f "$CFG" ]; then
   done
   if grep -qx 'CONFIG_KSU_HOOK_SUSFS_INLINE=y' "$CFG"; then
     ok "hook 后端 = SUSFS Inline"
+  elif grep -q 'config KSU_HOOK_SUSFS_INLINE' "$FINASU/kernel/Kconfig" 2>/dev/null; then
+    err "要求 SUSFS Inline 但 .config 未选中 CONFIG_KSU_HOOK_SUSFS_INLINE=y"
   elif grep -qx 'CONFIG_KSU_HOOK_TRACEPOINT=y' "$CFG"; then
-    echo "  warn hook 后端 = Tracepoint（可用但不如 Inline 干净）"
+    echo "  warn hook 后端 = Tracepoint（该 FinaSU 无 Inline 选项，可用但不如 Inline 干净）"
   fi
 else
   echo "  skip .config 尚未生成"
