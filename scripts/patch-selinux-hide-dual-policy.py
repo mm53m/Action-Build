@@ -1,5 +1,20 @@
 #!/usr/bin/env python3
-"""把 SUSFS 的 SELinux 查询钩子接到 KernelSU(FinaSU) 的双策略实现上。
+"""按 SUSFS 的版本形态，让三条「策略 oracle」不可见。
+
+两种模式
+--------
+1) **原生注册模式（SUSFS >= v2.4.0 + FinaSU >= a49dd71e）**：FinaSU 在注入类型
+   和 allow 规则时调用 ``susfs_add_sus_type()`` / ``susfs_add_sus_avd_allowed_by_type()``
+   登记「注入前的样子」，SUSFS 自己的查询钩子（``susfs_security_context_to_sid`` /
+   ``susfs_security_compute_av_user``）据此把注入类型判为不存在、把 allowed 位还原。
+   这是上游设计好的路径，本脚本**什么都不改**。
+
+2) **旧补丁模式（SUSFS < 2.4 或 FinaSU 无注册调用点）**：见下文，把外壳委托给
+   KernelSU 的双策略实现。
+
+历史说明（模式 2 的缘起）
+------------------------
+
 
 背景
 ----
@@ -186,6 +201,22 @@ def check_finasu_side(finasu):
     print("  = FinaSU 侧双策略符号齐备（my_write_context / my_write_access / my_setprocattr）")
 
 
+def native_registration(common, finasu):
+    """SUSFS v2.4 注册入口 + FinaSU 注册调用点是否同时存在。"""
+    susfs_c = common / "fs/susfs.c"
+    sep = finasu / "kernel/selinux/sepolicy.c"
+    kb = finasu / "kernel/Kbuild"
+    if not susfs_c.exists():
+        return False, "内核树里没有 fs/susfs.c（SUSFS 补丁未应用）"
+    if "susfs_add_sus_type" not in susfs_c.read_text(errors="ignore"):
+        return False, "fs/susfs.c 没有 susfs_add_sus_type（SUSFS < v2.4.0）"
+    if not sep.exists() or "KSU_SUSFS_HAS_TYPE_REGISTRATION" not in sep.read_text(errors="ignore"):
+        return False, "FinaSU 没有类型注册调用点（早于 a49dd71e）"
+    if kb.exists() and "SUSFS_REGISTRATION_PROBE" not in kb.read_text(errors="ignore"):
+        return False, "FinaSU Kbuild 没有注册入口探测（早于 9ee76f81）"
+    return True, "SUSFS v2.4.0 注册入口 + FinaSU 注册调用点 + Kbuild 探测齐备"
+
+
 def main():
     if len(sys.argv) < 2:
         print(__doc__)
@@ -193,7 +224,15 @@ def main():
     common = pathlib.Path(sys.argv[1]).resolve()
     finasu = pathlib.Path(sys.argv[2]).resolve() if len(sys.argv) > 2 else common.parent / "FinaSU"
 
-    print("接入双策略 SELinux 隐藏：common=%s finasu=%s" % (common, finasu))
+    print("SELinux 隐藏接线：common=%s finasu=%s" % (common, finasu))
+
+    native, why = native_registration(common, finasu)
+    if native:
+        print("  = 走 SUSFS 原生注册路径：%s" % why)
+        print("    FinaSU 已登记注入类型与注入前 allow 向量表，查询钩子保持 SUSFS 自己的实现，"
+              "不做任何改写。")
+        return 0
+    print("  ! 原生注册不可用（%s），回退到双策略委托" % why)
     check_finasu_side(finasu)
     changed = 0
     for spec in TARGETS:
