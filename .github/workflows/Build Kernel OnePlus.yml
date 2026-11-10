@@ -1599,13 +1599,16 @@ jobs:
           # -DKSU_SUSFS_HAS_TYPE_REGISTRATION=1。若 srctree 指向不对，探测静默失败、
           # 注册调用点被编译掉，selinux_hide 会退化成「开了但查得到 ksu 规则」。
           # Kbuild 生成的 .cmd 文件里有完整编译命令行，是最直接的证据。
-          cmd_file=$(find out -name '.susfs.o.cmd' -print -quit 2>/dev/null || true)
+          # 注意：宏是 drivers/kernelsu/Kbuild 里的 ccflags-y，只作用于驱动侧对象，
+          # 所以要看 sepolicy.o / rules.o 的 .cmd，而不是 fs/susfs.o（它由 fs/Makefile 编译）。
+          cmd_file=$(find out -path '*kernelsu/selinux*' -name '.sepolicy.o.cmd' -print -quit 2>/dev/null || true)
+          [ -n "$cmd_file" ] || cmd_file=$(find out -name '.sepolicy.o.cmd' -print -quit 2>/dev/null || true)
           if [ -z "$cmd_file" ]; then
-            echo "::warning title=SUSFS 注册宏::没有找到 fs/.susfs.o.cmd，跳过编译期宏核验"
+            echo "::warning title=SUSFS 注册宏::没有找到 .sepolicy.o.cmd，跳过编译期宏核验"
           elif grep -q 'KSU_SUSFS_HAS_TYPE_REGISTRATION=1' "$cmd_file"; then
-            echo "✅ SUSFS 2.4 注册宏已编入（$cmd_file 含 -DKSU_SUSFS_HAS_TYPE_REGISTRATION=1）"
+            echo "✅ SUSFS 2.4 注册宏已编入（$(basename "$cmd_file") 含 -DKSU_SUSFS_HAS_TYPE_REGISTRATION=1）"
           else
-            echo "::error title=SUSFS 注册宏::Kbuild 探测未命中，注册调用点被编译掉，隐藏会静默退化"
+            echo "::error title=SUSFS 注册宏::Kbuild 探测未命中（srctree 路径不对或 fs/susfs.c 缺注册入口），注册调用点被编译掉，隐藏会静默退化"
             exit 1
           fi
           ccache -s
