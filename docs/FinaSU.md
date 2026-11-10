@@ -76,3 +76,30 @@ KPM=KPN  LSM_BBG=true  NETFILTER=true  CCM=true
 DROID_SPACES=true  RE_KERNEL=true  LZ4_UPDATE=true
 ZRAM=0/lz4kd/8589934592  SUSFS_META=（空，跟随最新）
 ```
+
+## 固定构建方案（一加 Ace 2，所有构建都用这套）
+
+从首次构建（run 42739973829，job 名 `[FAST] [BBG] [DS] [REKER] [LZ4UPD] For oneplus_ace2_b`）反解出来的完整参数，作为默认方案固定下来：
+
+| 参数 | 值 | 依据 |
+| --- | --- | --- |
+| `FILE` | `oneplus_ace2_b` | job 名 `For oneplus_ace2_b` |
+| `FAST_BUILD` | `true` | `[FAST]` |
+| `LSM_BBG` | `true` | `[BBG]` |
+| `DROID_SPACES` | `true` | `[DS]` |
+| `RE_KERNEL` | `true` | `[REKER]` |
+| `LZ4_UPDATE` | `true` | `[LZ4UPD]` |
+| `KPM` | **`N/A`** | 既无 `[KPM]` 也无 `[KPN]` 标签 → 只有 `N/A` 符合 |
+| `ZRAM` | `0/lz4kd/8589934592` | 无 `[ZRAM]` 标签 → 不是 `1/` 开头，保持默认关闭 |
+| `KSU_META` | `master/master/` | 跟随 FinaSU 最新 |
+| `SUSFS_META` | 空 | 跟随最新 SUSFS |
+| `SUSFS_CI` | `CI` | 默认 |
+| `SCHED_HMBIRD` | `false` | 无 `[HMBIRD]` |
+| `UNICODE_BYPASS` | `false` | 默认 |
+| `SUFFIX` / `RESUBLEVEL` | 空 | job 名 `For oneplus_ace2_b ` 后无后缀 |
+| `NETFILTER` / `CCM` | `true` | 默认 |
+| `DYNAMIC_REPO` | `Numbersf` | 默认 |
+| `BUILD_TIME` | `Wed Jul 15 11:18:49 UTC 2026` | 默认 |
+| `SPACE_NOCLEAN` / `BUILD_NOCACHE` | `false` | 默认 |
+
+一键触发脚本：[`scripts/dispatch-ace2.sh`](../scripts/dispatch-ace2.sh)（`GITHUB_TOKEN=xxx ./scripts/dispatch-ace2.sh`，`DRY_RUN=1` 只打印 payload）。
