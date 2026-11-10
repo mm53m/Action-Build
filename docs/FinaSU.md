@@ -215,3 +215,14 @@ bash scripts/verify-susfs-selinux.sh <内核根或 kernel_platform> <FinaSU 目�
 | hook 后端 | Tracepoint（`warn`，未开 Inline） |
 
 刷机后按上文「运行时启用顺序」打开 `selinux_hide` 与 `avc_log_spoofing` 即可验证隐藏是否生效。
+
+### 双策略 SELinux 隐藏接线（App Zygote 侧信道修复）
+
+| 项 | 内容 |
+| --- | --- |
+| 现象 | `selinux_hide` 已开，检测 App 仍报 `selinux_kernelsu: true` / `selinux_magisk: true` / `kernelsu_traits_count: 4` |
+| 通道 | App Zygote 域持有 `security:check_context`、`security:compute_av`、`process:setcurrent` 三条 oracle（DirtySepolicy / Duck Detector） |
+| 根因 | SUSFS 的 `susfs_sel_write_context/access`、`susfs_selinux_setprocattr` 用 live policy 回答；FinaSU 双策略实现被 `#ifdef CONFIG_KSU_SUSFS return 0;` 短路成死代码 |
+| 修复 | 新增步骤 `Enable Dual-Policy SELinux Hide` → `scripts/patch-selinux-hide-dual-policy.py`，把三个外壳函数体改成委托 `my_write_context` / `my_write_access` / `my_setprocattr` |
+| 断言 | `scripts/verify-susfs-selinux.sh` §1b：三处必须含委托、不得残留 `susfs_security_*` live-policy 调用 |
+| 不改动 | 门控、SUSFS 全部功能、FinaSU 源码、`KSU_META`/`SUSFS_META` 语义 |
