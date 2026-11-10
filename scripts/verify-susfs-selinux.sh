@@ -80,9 +80,6 @@ else
   need_grep "$COMMON/security/selinux/ss/services.c" \
     'susfs_spoof_avd_allowed_rcu|susfs_is_sus_type_rcu' \
     "services.c: access 查询按原策略回填（隐藏 KSU 注入规则）"
-  need_grep "$COMMON/security/selinux/ss/services.c" \
-    'backup_sepolicy' \
-    "services.c: 使用 FinaSU 的 backup_sepolicy"
 fi
 
 echo "== 2. FinaSU 驱动侧符号导出（CONFIG_KSU_SUSFS 分支） =="
@@ -114,6 +111,12 @@ if [ -f "$SH" ]; then
     ok "selinux_hide.c: enable() 有 CONFIG_KSU_SUSFS 早退分支"
   else
     err "selinux_hide.c: enable() 缺少 CONFIG_KSU_SUSFS 早退分支（会与补丁钩子冲突）"
+  fi
+  # backup_sepolicy 是 enables「原始策略解析」的根：没有它，enable() 会 -EAGAIN
+  if grep -qE '^struct selinux_policy \*backup_sepolicy;' "$FINASU/kernel/selinux/rules.c" 2>/dev/null; then
+    ok "rules.c: backup_sepolicy 全局定义（可带 SUSFS 新形态补丁）"
+  else
+    err "rules.c: 未找到 backup_sepolicy 定义（SUSFS 新形态补丁无处挂载）"
   fi
   if grep -q 'build_feature_handlers()' "$SH" || grep -q 'KSU_FEATURE_SELINUX_HIDE' "$SH"; then
     ok "selinux_hide.c: 注册了 KSU_FEATURE_SELINUX_HIDE"
