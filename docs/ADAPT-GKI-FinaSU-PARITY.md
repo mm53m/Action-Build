@@ -1,7 +1,10 @@
 # 把 GKI_FinaSU 的「SUSFS×SELinux」工程做法适配进 mm53m/Action-Build（FinaSU 分支）
 
 > 适用范围：`.github/workflows/Build Kernel OnePlus.yml`（分支 `FinaSU`，本地副本
-> `/root/ab-work/wf-FinaSU.yml`，当前 56 steps）。下面每块都标了插入位置，未改动远端分支。
+> `/root/ab-work/wf-FinaSU.yml`，当前 56 steps）。
+>
+> **状态：A（pin）与 B（断言）已落地并通过构建验证**（run `42763053546` 成功）。
+> C（SUSFS Inline 后端）与 D（第二签名槽）仍为可选，未启用。
 
 ## 0. 差距清单（对照 `/root/ref/GKI_FinaSU`）
 
