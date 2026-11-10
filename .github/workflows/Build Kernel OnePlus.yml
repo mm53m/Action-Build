@@ -1593,6 +1593,21 @@ jobs:
           echo "✅ 编译期配置断言全部通过"
 
           make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}"
+
+          # 编译后确认「SUSFS 2.4 原生注册」这条路径真的被编进去了：
+          # FinaSU Kbuild 用 $(srctree)/fs/susfs.c 探测 susfs_add_sus_type，命中才
+          # -DKSU_SUSFS_HAS_TYPE_REGISTRATION=1。若 srctree 指向不对，探测静默失败、
+          # 注册调用点被编译掉，selinux_hide 会退化成「开了但查得到 ksu 规则」。
+          # Kbuild 生成的 .cmd 文件里有完整编译命令行，是最直接的证据。
+          cmd_file=$(find out -name '.susfs.o.cmd' -print -quit 2>/dev/null || true)
+          if [ -z "$cmd_file" ]; then
+            echo "::warning title=SUSFS 注册宏::没有找到 fs/.susfs.o.cmd，跳过编译期宏核验"
+          elif grep -q 'KSU_SUSFS_HAS_TYPE_REGISTRATION=1' "$cmd_file"; then
+            echo "✅ SUSFS 2.4 注册宏已编入（$cmd_file 含 -DKSU_SUSFS_HAS_TYPE_REGISTRATION=1）"
+          else
+            echo "::error title=SUSFS 注册宏::Kbuild 探测未命中，注册调用点被编译掉，隐藏会静默退化"
+            exit 1
+          fi
           ccache -s
 
       - name: Fallback to Build Kernel
