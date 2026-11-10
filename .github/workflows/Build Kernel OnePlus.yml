@@ -800,7 +800,27 @@ jobs:
                 git checkout "$SUSFS_META"
               fi
             else
-              echo "SUSFS_META 为空，使用最新上游 SUSFS"
+              # 默认 pin 到已验证的提交：SUSFS 上游会跟着 KernelSU 一起 rebase，
+              # security/selinux/* 的 hunk 形态（my_setprocattr/&fake_state 老形态 vs
+              # backup_sepolicy + susfs_security_context_to_sid 新形态）一旦漂移，
+              # 就会与 FinaSU 当前导出的符号（fake_status / ksu_selinux_hide_running）
+              # 对不上，表现为链接期 undefined symbol 或隐藏静默失效。
+              # 5436438b = 2026-11-09 "KernelSU: Sync with upstream"，与 run 42745210022
+              # 成功产物逐字节对应（v2.4.0，新形态）。其它 KMI 未验证，保持跟随最新。
+              case "${{ env.KANDROID_VERSION }}-${{ env.KERNEL_VERSION }}" in
+                12-5.10) SUSFS_PIN=5436438b5cc77f146e04f71070da153dabe17a9d ;;
+                *)       SUSFS_PIN="" ;;
+              esac
+              if [ -n "$SUSFS_PIN" ]; then
+                if git fetch --depth 1 origin "$SUSFS_PIN" && git checkout "$SUSFS_PIN"; then
+                  echo "✅ SUSFS 已 pin 到 $SUSFS_PIN（已验证提交）"
+                else
+                  echo "::warning title=SUSFS pin::无法检出 $SUSFS_PIN，回退到分支最新"
+                fi
+              else
+                echo "SUSFS_META 为空，使用最新上游 SUSFS（本 KMI 未 pin）"
+              fi
+              echo "SUSFS HEAD: $(git rev-parse HEAD) $(git log -1 --pretty=%s)"
             fi
             cd ..
           fi
@@ -840,9 +860,20 @@ jobs:
           fi
 
           if [ "${{ github.event.inputs.SUSFS_META }}" != "-1" ]; then
+            # 不再吞掉失败：部分命中（rej）会让内核侧钩子只装一半，
+            # 结果是编译通过但 selinux_hide 静默失效，必须当场失败。
             echo "正在打susfs补丁"
-            patch -p1 < 50_add_susfs_in_gki-${{ env.KANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch || true
-            echo "susfs_patch完成"
+            if patch -p1 --forward < 50_add_susfs_in_gki-${{ env.KANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch; then
+              echo "susfs_patch完成"
+            else
+              echo "::error title=SUSFS 补丁失败::50_add_susfs 未能完整应用（见上方 Hunk #N FAILED），请核对 SUSFS 提交与 KMI"
+              exit 1
+            fi
+            if compgen -G "*.rej" > /dev/null; then
+              echo "::error title=SUSFS 补丁残留::存在 .rej 补丁块，内核侧钩子不完整"
+              ls -1 *.rej
+              exit 1
+            fi
           fi
           source $REJ_CHECKER
           check_rejects .
@@ -1483,6 +1514,52 @@ jobs:
           fi
 
           make O=out "${MAKE_ARGS[@]}" olddefconfig --no-print-directory
+
+          # 编译前断言：SELinux 隐藏 × SUSFS 的编译期契约必须同时成立，
+          # 否则产物会出现「内核能启动但 selinux_hide 静默失效」或链接期 undefined symbol。
+          # （契约说明见 action-build 仓库 docs/FinaSU.md；校验器 scripts/verify-susfs-selinux.sh）
+          if [ "${{ github.event.inputs.SUSFS_META }}" != "-1" ]; then
+            bash "$GITHUB_WORKSPACE/kernel_workspace/Action-Build/scripts/verify-susfs-selinux.sh" \
+                 "$PWD" "$GITHUB_WORKSPACE/kernel_workspace/FinaSU"
+          fi
+
+          # 编译期配置断言：set_config 是纯文本替换，olddefconfig 会静默丢弃依赖不满足的项
+          assert_cfg() { # file key desc
+            if grep -qxE "$2=y" "$1"; then
+              echo "  ok  $2=y"
+            else
+              echo "::error title=配置未生效::$3 期望 $2=y，实际未生效（依赖不满足或符号不存在）"
+              return 1
+            fi
+          }
+          cfg_fail=0
+          for k in CONFIG_KSU CONFIG_KSU_SUSFS CONFIG_KALLSYMS_ALL CONFIG_KPROBES \
+                   CONFIG_EXT4_FS CONFIG_HEADERS_INSTALL CONFIG_SECURITY_SELINUX \
+                   CONFIG_SECURITY_SELINUX_DEVELOP; do
+            assert_cfg out/.config "$k" "FinaSU/SELinux 必需项" || cfg_fail=1
+          done
+          if [ "${{ github.event.inputs.SUSFS_META }}" != "-1" ]; then
+            for k in CONFIG_KSU_SUSFS_SUS_PATH CONFIG_KSU_SUSFS_SUS_MAP CONFIG_KSU_SUSFS_SUS_MOUNT \
+                     CONFIG_KSU_SUSFS_SUS_KSTAT CONFIG_KSU_SUSFS_SPOOF_UNAME CONFIG_KSU_SUSFS_ENABLE_LOG \
+                     CONFIG_KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+                     CONFIG_KSU_SUSFS_OPEN_REDIRECT; do
+              assert_cfg out/.config "$k" "SUSFS 功能项" || cfg_fail=1
+            done
+            if grep -qxE 'CONFIG_KSU_HOOK_SUSFS_INLINE=y' out/.config; then
+              echo "  ok  hook 后端 = SUSFS Inline"
+            elif grep -qxE 'CONFIG_KSU_HOOK_TRACEPOINT=y' out/.config; then
+              echo "  warn hook 后端 = Tracepoint（功能等价，检测面更大）"
+            else
+              echo "::error title=hook 后端::既未选中 SUSFS Inline 也未选中 Tracepoint"
+              cfg_fail=1
+            fi
+          fi
+          if [ "$cfg_fail" -ne 0 ]; then
+            echo "::error title=配置断言失败::关键配置未生效，继续构建只会产出一个功能残缺的内核"
+            exit 1
+          fi
+          echo "✅ 编译期配置断言全部通过"
+
           make -j"$(nproc --all)" O=out "${MAKE_ARGS[@]}"
           ccache -s
 
