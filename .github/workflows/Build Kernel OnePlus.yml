@@ -100,9 +100,9 @@ on:
         default: "Wed Jul 15 11:18:49 UTC 2026"
       KSU_META:
         type: string
-        description: "管理器分支名(必填)/内置分支名(必填)/回退分支提交哈希版本(留空不修改)//Manager Branch name (Required) / Builtin branch name (Required) / Rollback branch commit hash version (Leave blank to not modify)"
+        description: "FinaSU 管理器分支名(必填)/内置分支名(可与管理器分支相同)/回退提交哈希版本(留空不修改)//FinaSU manager ref (Required) / builtin ref (may equal manager ref) / rollback commit hash (Leave blank to not modify)"
         required: false
-        default: "main/main/"
+        default: "master/master/"
       LZ4_UPDATE:
         type: boolean
         description: "是否升级LZ4到上游最新？//Upgrade LZ4 to the latest upstream?"
@@ -208,7 +208,7 @@ jobs:
           git config --global user.name "Numbersf"
           git config --global user.email "263623064@qq.com"
           mkdir kernel_workspace && cd kernel_workspace
-          git clone https://github.com/Numbersf/Action-Build.git -b KernelSU
+          git clone https://github.com/Numbersf/Action-Build.git -b FinaSU
 
       - name: Extract Manifest Info
         id: extract_info
@@ -651,9 +651,9 @@ jobs:
             chmod +x "$f"
           done
 
-      - name: Add KernelSU
+      - name: Add FinaSU
         run: |
-          cd kernel_workspace/kernel_platform
+          cd "$GITHUB_WORKSPACE/kernel_workspace"
           KSU_META="${{ github.event.inputs.KSU_META }}"
 
           # 必须包含两个分隔符（至少三个字段）
@@ -662,31 +662,65 @@ jobs:
             exit 10
           fi
 
-          # 解析字段：分支 / 自定义标识 / 手动 hash
           IFS='/' read -r KSU_MANAGER_BRANCH KSU_BUILTIN_BRANCH MANUAL_HASH <<< "$KSU_META"
           echo "KSU_MANAGER_BRANCH=$KSU_MANAGER_BRANCH" >> $GITHUB_ENV
           echo "KSU_BUILTIN_BRANCH=$KSU_BUILTIN_BRANCH" >> $GITHUB_ENV
           [[ -n "$MANUAL_HASH" ]] && echo "手动指定 hash: $MANUAL_HASH" || echo "手动指定 hash: 未启用"
 
-          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/refs/heads/${KSU_MANAGER_BRANCH}/kernel/setup.sh" | bash -s "$KSU_BUILTIN_BRANCH"
-          cd ./KernelSU
+          # 1) 自动拉取 FinaSU 最新源码（跟随上游，保留原有 KSU 修补方式）
+          FINASU_REPO="https://github.com/LyraVoid/FinaSU.git"
+          FINASU_DIR="$GITHUB_WORKSPACE/kernel_workspace/FinaSU"
+          if [ ! -d "$FINASU_DIR" ]; then
+            git clone "$FINASU_REPO" "$FINASU_DIR"
+          fi
+          cd "$FINASU_DIR"
+          git fetch origin --tags --force
+
+          if git rev-parse --verify "origin/${KSU_MANAGER_BRANCH}" >/dev/null 2>&1; then
+            git checkout -B "$KSU_MANAGER_BRANCH" "origin/${KSU_MANAGER_BRANCH}"
+          elif git rev-parse --verify "${KSU_MANAGER_BRANCH}" >/dev/null 2>&1; then
+            git checkout "$KSU_MANAGER_BRANCH"
+          else
+            echo "::warning title=FinaSU Ref::未找到 ${KSU_MANAGER_BRANCH}，使用上游默认分支"
+            git checkout "$(git symbolic-ref --short refs/remotes/origin/HEAD | sed 's|^origin/||')"
+          fi
+
+          if [[ -n "$KSU_BUILTIN_BRANCH" && "$KSU_BUILTIN_BRANCH" != "$KSU_MANAGER_BRANCH" ]]; then
+            echo "切换到内置分支: $KSU_BUILTIN_BRANCH"
+            if git rev-parse --verify "origin/${KSU_BUILTIN_BRANCH}" >/dev/null 2>&1; then
+              git checkout -B "$KSU_BUILTIN_BRANCH" "origin/${KSU_BUILTIN_BRANCH}"
+            elif git rev-parse --verify "${KSU_BUILTIN_BRANCH}" >/dev/null 2>&1; then
+              git checkout "$KSU_BUILTIN_BRANCH"
+            else
+              echo "::warning title=FinaSU Builtin::内置分支 ${KSU_BUILTIN_BRANCH} 不存在，沿用管理器分支"
+            fi
+          fi
 
           if [[ -n "$MANUAL_HASH" ]]; then
-            git fetch origin "$KSU_BUILTIN_BRANCH" --depth=50
+            git fetch origin --tags --force
             git checkout "$MANUAL_HASH"
           fi
 
-          KSU_VERSION=$(expr $(curl -sI "https://api.github.com/repos/tiann/KernelSU/commits?sha=${KSU_MANAGER_BRANCH}&per_page=1" | grep -i "link:" | sed -n 's/.*page=\([0-9]*\)>; rel="last".*/\1/p') "+" 30000)
+          # 2) 用 FinaSU 自带 setup.sh 挂进内核树：drivers/kernelsu 符号链接 + Makefile/Kconfig
+          cd "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform"
+          sh "$FINASU_DIR/kernel/setup.sh" --dir "$FINASU_DIR"
+
+          # 3) 版本号：与 FinaSU kernel/Kbuild 的 KSU_VERSION 计算公式保持一致
+          KSU_GIT_COUNT=$(cd "$FINASU_DIR" && git rev-list --count HEAD)
+          KSU_VERSION=$((KSU_GIT_COUNT + 30000))
+          KSU_VERSION_TAG=$(cd "$FINASU_DIR" && git describe --tags --abbrev=0 2>/dev/null | sed 's/^v//' || true)
+          [ -n "$KSU_VERSION_TAG" ] || KSU_VERSION_TAG="unknown"
+          echo "KSU_VERSION_TAG=$KSU_VERSION_TAG" >> $GITHUB_ENV
           echo "KSUVER=$KSU_VERSION" >> $GITHUB_ENV
           echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
-          sed -i "s/DKSU_VERSION=16/DKSU_VERSION=${KSU_VERSION}/" kernel/Kbuild
+          echo "FinaSU 版本: v${KSU_VERSION_TAG} / KSUVER=${KSU_VERSION} / 提交数=${KSU_GIT_COUNT}"
 
       - name: Apply Fake Patches
         if: ${{ github.event.inputs.SUSFS_META != '-1' }}
         run: |
           kotlin "$GITHUB_WORKSPACE/kernel_workspace/Action-Build/scripts/PatchFakePatches.kts" apply "$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/common"
 
-      - name: Apply Patches KernelSU
+      - name: Apply Patches FinaSU
         env:
           FILE: ${{ github.event.inputs.FILE }}
         run: |
@@ -717,7 +751,7 @@ jobs:
           if [ "${{ github.event.inputs.SUSFS_META }}" != "-1" ]; then
             echo "正在拉取susfs补丁"
             cp ../susfs4ksu/kernel_patches/50_add_susfs_in_gki-${{ env.KANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch ./common/
-            cp ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ./KernelSU/
+            cp ../susfs4ksu/kernel_patches/KernelSU/10_enable_susfs_for_ksu.patch ../FinaSU/
             cp ../susfs4ksu/kernel_patches/fs/* ./common/fs/
             cp ../susfs4ksu/kernel_patches/include/linux/* ./common/include/linux/
           fi
@@ -731,10 +765,10 @@ jobs:
           fi
 
           if [ "${{ github.event.inputs.SUSFS_META }}" != "-1" ]; then
-            cd ./KernelSU
+            cd ../FinaSU
             sed -i 's|kernel/Makefile|kernel/Kbuild|g' ./10_enable_susfs_for_ksu.patch
             patch -p1 < 10_enable_susfs_for_ksu.patch || true
-            cd ../common
+            cd ../kernel_platform/common
           else
             cd ./common
           fi
@@ -995,8 +1029,12 @@ jobs:
           }
           trap 'inject_fake_config' EXIT
 
-          # KernelSU配置
+          # FinaSU 内置集成必需项（见 FinaSU/docs/builtin-integration.md）
           set_config "CONFIG_KSU=y"
+          set_config "CONFIG_KPROBES=y"
+          set_config "CONFIG_KALLSYMS_ALL=y"
+          set_config "CONFIG_EXT4_FS=y"
+          set_config "CONFIG_HEADERS_INSTALL=y"
 
           # KPM配置
           if [ "${{ github.event.inputs.KPM }}" = "KPM" ] || [ "${{ github.event.inputs.KPM }}" = "N/A" ]; then
@@ -1344,6 +1382,7 @@ jobs:
             PAHOLE="$PAHOLE_BIN"
             KCFLAGS="$KCFLAGS"
             KCPPFLAGS="$KCPPFLAGS"
+            KSU_REQUIRE_PREINIT=1
           )
 
           if [[ -n "${CONFIG_FAKE_DISABLE:-}" ]]; then
@@ -1463,31 +1502,47 @@ jobs:
           wget -O ksu_module_susfs_1.5.2+_Release.zip https://github.com/sidex15/ksu_module_susfs/releases/latest/download/ksu_module_susfs_1.5.2+.zip
           cp ksu_module_susfs_1.5.2+_Release.zip ./AnyKernel3/
 
-      - name: Download Latest KernelSU APK from CI
+      - name: Download Latest FinaSU Manager APK (Release first, CI fallback)
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          MANAGER_ARTIFACT=manager
+          MANAGER_REPO=LyraVoid/FinaSU
+          MANAGER_ARTIFACT=manager-gradle
+          mkdir -p ./AnyKernel3
 
-          echo "Using branch: $KSU_MANAGER_BRANCH"
-          echo "Downloading artifact: $MANAGER_ARTIFACT"
+          echo "Using FinaSU ref: $KSU_MANAGER_BRANCH"
+          APK_OK=0
 
-          run_id=$(gh api "repos/tiann/KernelSU/actions/workflows/build-manager.yml/runs?branch=$KSU_MANAGER_BRANCH&status=success&event=push&per_page=1" --jq '.workflow_runs[0].id' || echo "")
-
-          if [[ -z "$run_id" ]]; then
-            echo "No successful workflow run found on branch $KSU_MANAGER_BRANCH. Skipping download."
-            exit 0
+          # 1) 先取官方 Release 的 APK：其签名与 FinaSU kernel/Kbuild 内置的 EXPECTED_SIZE/HASH 默认值一致
+          release_json=$(gh api "repos/$MANAGER_REPO/releases/latest" 2>/dev/null || true)
+          apk_url=$(printf '%s' "$release_json" | jq -r '.assets[]?.browser_download_url' 2>/dev/null | grep -iE '\.apk$' | head -n1 || true)
+          if [[ -n "$apk_url" ]]; then
+            echo "Release APK: $apk_url"
+            if curl -fL -H "Authorization: token $GITHUB_TOKEN" -o ./AnyKernel3/FinaSU-Manager.apk "$apk_url"; then
+              APK_OK=1
+            fi
           fi
-          artifact_url=$(gh api "repos/tiann/KernelSU/actions/runs/$run_id/artifacts" | jq -r ".artifacts[] | select(.name == \"$MANAGER_ARTIFACT\") | .archive_download_url" | head -n1)
 
-          if [[ -z "$artifact_url" ]]; then
-            echo "No artifact '$MANAGER_ARTIFACT' found in run $run_id. Skipping download."
-            exit 0
+          # 2) Release 不可用时回退到 CI 最新一次成功构建
+          if [[ "$APK_OK" -ne 1 ]]; then
+            echo "Release 不可用，回退到 CI 产物"
+            run_id=$(gh api "repos/$MANAGER_REPO/actions/workflows/build-manager.yml/runs?branch=$KSU_MANAGER_BRANCH&status=success&per_page=1" --jq '.workflow_runs[0].id' 2>/dev/null || echo "")
+            if [[ -z "$run_id" ]]; then
+              echo "No successful CI run found on $KSU_MANAGER_BRANCH. Skipping manager APK."
+              exit 0
+            fi
+            artifact_url=$(gh api "repos/$MANAGER_REPO/actions/runs/$run_id/artifacts" | jq -r ".artifacts[] | select(.name == \"$MANAGER_ARTIFACT\") | .archive_download_url" | head -n1)
+            if [[ -z "$artifact_url" ]]; then
+              echo "No artifact '$MANAGER_ARTIFACT' in run $run_id. Skipping manager APK."
+              exit 0
+            fi
+            curl -fL -H "Authorization: token $GITHUB_TOKEN" -o "${MANAGER_ARTIFACT}.zip" "$artifact_url"
+            unzip -j "${MANAGER_ARTIFACT}.zip" "*.apk" -d ./AnyKernel3/
           fi
-          echo "Downloading from: $artifact_url"
-          curl -fL -H "Authorization: token $GITHUB_TOKEN" -o "${MANAGER_ARTIFACT}.zip" "$artifact_url"
-          unzip -j "${MANAGER_ARTIFACT}.zip" "*.apk" -d ./AnyKernel3/
+
+          echo "AnyKernel3 内的管理器 APK:"
+          ls -1 ./AnyKernel3/*.apk 2>/dev/null || true
 
       - name: Set zip Suffix
         id: suffix
@@ -1497,7 +1552,7 @@ jobs:
       - name: Upload AnyKernel3
         uses: actions/upload-artifact@v7
         with:
-          name: AnyKernel3_KernelSU_${{ env.KSUVER }}_${{ steps.extract_info.outputs.value }}(${{ env.CKERNEL_VERSION }})${{ steps.suffix.outputs.value }}
+          name: AnyKernel3_FinaSU_${{ env.KSUVER }}_${{ steps.extract_info.outputs.value }}(${{ env.CKERNEL_VERSION }})${{ steps.suffix.outputs.value }}
           path: ./AnyKernel3/*
 
       - name: Extract and Process ZRAM Module
