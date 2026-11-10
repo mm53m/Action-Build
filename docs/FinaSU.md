@@ -103,3 +103,51 @@ ZRAM=0/lz4kd/8589934592  SUSFS_META=（空，跟随最新）
 | `SPACE_NOCLEAN` / `BUILD_NOCACHE` | `false` | 默认 |
 
 一键触发脚本：[`scripts/dispatch-ace2.sh`](../scripts/dispatch-ace2.sh)（`GITHUB_TOKEN=xxx ./scripts/dispatch-ace2.sh`，`DRY_RUN=1` 只打印 payload）。
+
+## 管理器识别机制（为什么“管理器与内核驱动通道挂掉”）
+
+内核对管理器的识别**只看 APK 签名证书**，不看包名、不看版本：
+
+- `kernel/manager/apk_sign.c` 从 APK 签名块里取出签名证书（X.509 DER），算 `sha256(cert)`，再和编译期常量 `EXPECTED_SIZE` / `EXPECTED_HASH` 逐字节比对。
+- 这两个常量来自 `kernel/Kbuild`：
+
+  ```make
+  ifndef KSU_EXPECTED_SIZE
+  KSU_EXPECTED_SIZE := 0x033b
+  endif
+  ifndef KSU_EXPECTED_HASH
+  KSU_EXPECTED_HASH := c371061b19d8c7d7d6133c6a9bafe198fa944e50c1b31c9d8daa8d7f1fc2d2d6
+  endif
+  ```
+
+- 命中 `EXPECTED_*` 的进程才会被标记为 manager；不命中**不会报错、不会拒绝启动**，只是 `prctl` 管理通道返回失败 → 管理器显示“未安装/无法连接”，而已授权的应用仍能 `su`、模块仍能加载、内核照常启动。这与你遇到的现象完全一致。
+- **实测：`kernel/Kbuild` 的默认值已经过期**。v1.5.1 Release 的 `FinaSU_v1.5.1_33177-release.apk` 实际签名是 `size=716 (0x02cc)` / `sha256=2d89b50aaf1db013c2b6738f973f48b62ea21a3a8d7216bfec3521065d448458`（取自 APK Signing Block v2 的第一张证书），而 Kbuild 里写的是 `0x033b` / `c371061b…`。两者不一致 → 用它默认值编出来的内核**不认随包的 Release APK**，通道失效。这就是“驱动正常、管理器连不上”的根因，不是管理器坏了。
+
+### 本分支的修法：签名内联（不再依赖上游默认值）
+
+`Pin FinaSU Manager Signature` 这一步在编译前执行：
+
+1. 从 `LyraVoid/FinaSU` 取**即将随包分发的那一个 APK**（Release 优先，回退 CI `manager-gradle`）；
+2. 解出 `META-INF/*.RSA` → 第一张证书 → DER；
+3. 算出 `size` 与 `sha256`，写进 `$GITHUB_ENV` 的 `KSU_EXPECTED_SIZE` / `KSU_EXPECTED_HASH`，并附加 `KSU_MANAGER_PACKAGE=me.yuki.fina`；
+4. `Build Kernel` 把它们作为 make 变量传给 Kbuild（`ifndef` 不再生效），内核编译出的期望签名 = 包里那个 APK 的签名。
+
+因此换 Release、换 CI 包、换重签包都不会再出现“内核不认管理器”——内核认的永远是同一个包里那个 APK。打包步骤也改成直接复用同一次下载的文件，避免“内核按 A 签名编译、包里塞 B APK”。
+
+### 设备侧自查（刷完起不来管理器时按顺序看）
+
+```bash
+# 1) 内核有没有打印签名/管理器相关
+su -c 'dmesg | grep -iE "kernelsu|dynamic_manager|signature"'
+
+# 2) 当前装的到底是哪个管理器、什么版本
+pm list packages | grep -iE 'fina|kernelsu|sukisu'
+dumpsys package me.yuki.fina | grep -E 'versionName|versionCode'
+
+# 3) 已授权数据库是否还在（在就说明只是管理器通道没通）
+su -c 'ls -l /data/adb/ksu /data/adb/ksu/.. 2>/dev/null'
+
+# 4) 用随包 APK 覆盖（同签名可覆盖；提示签名冲突说明装的是别的签名版本，先卸载再装）
+```
+
+结论：只要 4) 装的是 zip 里的 `FinaSU-Manager.apk`，且内核是按本分支新流程编译的，管理器必然能连上驱动。

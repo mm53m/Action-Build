@@ -719,6 +719,66 @@ jobs:
           echo "ksuver=$KSU_VERSION" >> $GITHUB_OUTPUT
           echo "FinaSU 版本: v${KSU_VERSION_TAG} / KSUVER=${KSU_VERSION} / 提交数=${KSU_GIT_COUNT}"
 
+      - name: Pin FinaSU Manager Signature
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MANAGER_PACKAGE: me.yuki.fina
+        run: |
+          set -e
+          MANAGER_REPO=LyraVoid/FinaSU
+          MANAGER_ARTIFACT=manager-gradle
+          APK=/tmp/finasu-manager.apk
+          rm -f "$APK"
+
+          # 管理器识别 = APK 签名证书的 DER 长度 + SHA256（kernel/manager/apk_sign.c），
+          # 对不上时内核不报错、只是不把该 App 认成 manager，
+          # 表现就是：内核正常启动、已授权 App 仍能 su、模块照常加载，但管理器连不上驱动。
+          # kernel/Kbuild 里写死的默认值（0x033b / c371061b...）已经和 v1.5.1 Release 的
+          # 实际签名（0x02cc / 2d89b50a...）不一致，所以这里不再用默认值，
+          # 而是把“即将随包分发的那个 APK”本身的证书算出来，编进内核。
+          apk_url=$(gh api "repos/$MANAGER_REPO/releases/latest" --jq '.assets[]?.browser_download_url' 2>/dev/null | grep -iE '\.apk$' | head -n1 || true)
+          if [[ -n "$apk_url" ]]; then
+            echo "Release APK: $apk_url"
+            curl -fsSL -H "Authorization: token $GITHUB_TOKEN" -o "$APK" "$apk_url" || rm -f "$APK"
+          fi
+
+          if [[ ! -s "$APK" ]]; then
+            echo "Release 不可用，回退到 CI 产物"
+            run_id=$(gh api "repos/$MANAGER_REPO/actions/workflows/build-manager.yml/runs?branch=$KSU_MANAGER_BRANCH&status=success&per_page=1" --jq '.workflow_runs[0].id' 2>/dev/null || true)
+            if [[ -n "$run_id" ]]; then
+              artifact_url=$(gh api "repos/$MANAGER_REPO/actions/runs/$run_id/artifacts" --jq ".artifacts[] | select(.name == \"$MANAGER_ARTIFACT\") | .archive_download_url" | head -n1 || true)
+              if [[ -n "$artifact_url" ]]; then
+                curl -fsSL -H "Authorization: token $GITHUB_TOKEN" -o /tmp/manager.zip "$artifact_url"
+                rm -rf /tmp/manager-apk && mkdir -p /tmp/manager-apk
+                python3 -c "import zipfile,sys;zipfile.ZipFile('/tmp/manager.zip').extractall('/tmp/manager-apk')"
+                APK=$(find /tmp/manager-apk -name '*.apk' | head -n1)
+              fi
+            fi
+          fi
+
+          if [[ ! -s "$APK" ]]; then
+            echo "::warning title=FinaSU Manager::拿不到管理器 APK，内核沿用 kernel/Kbuild 默认签名（可能与随包 APK 不匹配）"
+            exit 0
+          fi
+
+          # 从 APK Signing Block 取签名证书（v2/v3），不依赖 v1 JAR 签名
+          read -r CERT_SIZE CERT_HASH <<<"$(python3 "$GITHUB_WORKSPACE/kernel_workspace/Action-Build/scripts/manager_cert.py" "$APK")"
+
+          if [[ -z "${CERT_HASH:-}" ]]; then
+            echo "::warning title=FinaSU Manager::没解析出签名证书"
+            exit 0
+          fi
+
+          {
+            printf 'KSU_EXPECTED_SIZE=0x%04x\n' "$CERT_SIZE"
+            echo "KSU_EXPECTED_HASH=$CERT_HASH"
+            echo "KSU_MANAGER_PACKAGE=$MANAGER_PACKAGE"
+          } >> "$GITHUB_ENV"
+
+          echo "管理器签名: size=$CERT_SIZE (0x$(printf '%04x' "$CERT_SIZE")) hash=$CERT_HASH"
+          echo "管理器包名: $MANAGER_PACKAGE"
+          echo "内核将只认这个签名，随包 APK 与它一一对应"
+
       - name: Apply Fake Patches
         if: ${{ github.event.inputs.SUSFS_META != '-1' }}
         run: |
@@ -1384,6 +1444,18 @@ jobs:
             KSU_REQUIRE_PREINIT=1
           )
 
+          # 内核侧管理器身份：由前一步 Pin FinaSU Manager Signature 从随包 APK 里算出
+          if [[ -n "${KSU_EXPECTED_SIZE:-}" && -n "${KSU_EXPECTED_HASH:-}" ]]; then
+            MAKE_ARGS+=(KSU_EXPECTED_SIZE="$KSU_EXPECTED_SIZE")
+            MAKE_ARGS+=(KSU_EXPECTED_HASH="$KSU_EXPECTED_HASH")
+            echo "内联管理器签名: $KSU_EXPECTED_SIZE / $KSU_EXPECTED_HASH"
+          else
+            echo "::warning title=Manager Signature::未内联签名，使用 FinaSU Kbuild 默认值"
+          fi
+          if [[ -n "${KSU_MANAGER_PACKAGE:-}" ]]; then
+            MAKE_ARGS+=(KSU_MANAGER_PACKAGE="$KSU_MANAGER_PACKAGE")
+          fi
+
           if [[ -n "${CONFIG_FAKE_DISABLE:-}" ]]; then
             MAKE_ARGS+=(CONFIG_FAKE_DISABLE="$CONFIG_FAKE_DISABLE")
           fi
@@ -1512,6 +1584,13 @@ jobs:
 
           echo "Using FinaSU ref: $KSU_MANAGER_BRANCH"
           APK_OK=0
+
+          # 0) 复用 Pin FinaSU Manager Signature 已下载的那一份，保证“内核认的签名”和“包里的 APK”是同一个文件
+          if [[ -s /tmp/finasu-manager.apk ]]; then
+            cp /tmp/finasu-manager.apk ./AnyKernel3/FinaSU-Manager.apk
+            APK_OK=1
+            echo "复用已内联签名的管理器 APK"
+          fi
 
           # 1) 先取官方 Release 的 APK：其签名与 FinaSU kernel/Kbuild 内置的 EXPECTED_SIZE/HASH 默认值一致
           release_json=$(gh api "repos/$MANAGER_REPO/releases/latest" 2>/dev/null || true)
