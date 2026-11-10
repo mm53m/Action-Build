@@ -82,6 +82,41 @@ else
     "services.c: access 查询按原策略回填（隐藏 KSU 注入规则）"
 fi
 
+echo "== 1b. 三条策略 oracle 已委托给双策略实现（backup_sepolicy） =="
+# 只装 SUSFS 的静态钩子时，这三条都按 live policy 回答，App Zygote 域
+# （DirtySepolicy / Duck Detector）能直接问出 ksu_file / su 规则。
+body_of() { # file func -> 打印函数体（从签名行到行首 } 为止）
+  awk -v f="$2" '$0 ~ ("[ \t]" f "\\(") {p=1} p {print} p && /^}$/ {exit}' "$1"
+}
+check_delegated() { # file func callee desc
+  local body; body=$(body_of "$1" "$2")
+  if [ -z "$body" ]; then
+    err "$4: 函数 $2 不存在（SUSFS 补丁形态变更）"
+    return
+  fi
+  if printf '%s\n' "$body" | grep -q "$3("; then
+    ok "$4: $2 委托给 $3()（按 backup_sepolicy 回答）"
+  else
+    err "$4: $2 仍用 live policy 回答（未接入 $3，App Zygote 侧信道可读出 ksu 规则）"
+  fi
+}
+check_delegated "$COMMON/security/selinux/selinuxfs.c" susfs_sel_write_context my_write_context "check_context oracle"
+check_delegated "$COMMON/security/selinux/selinuxfs.c" susfs_sel_write_access  my_write_access  "compute_av oracle"
+check_delegated "$COMMON/security/selinux/hooks.c"      susfs_selinux_setprocattr my_setprocattr "setcurrent oracle"
+
+if body_of "$COMMON/security/selinux/selinuxfs.c" susfs_sel_write_access \
+     | grep -q 'susfs_security_compute_av_user('; then
+  err "selinuxfs.c: susfs_sel_write_access 仍调用 susfs_security_compute_av_user（live policy 泄漏）"
+fi
+if body_of "$COMMON/security/selinux/selinuxfs.c" susfs_sel_write_context \
+     | grep -q 'susfs_security_context_to_sid('; then
+  err "selinuxfs.c: susfs_sel_write_context 仍调用 susfs_security_context_to_sid（live policy 泄漏）"
+fi
+if body_of "$COMMON/security/selinux/hooks.c" susfs_selinux_setprocattr \
+     | grep -q 'susfs_security_context_to_sid('; then
+  err "hooks.c: susfs_selinux_setprocattr 仍调用 susfs_security_context_to_sid（live policy 泄漏）"
+fi
+
 echo "== 2. FinaSU 驱动侧符号导出（CONFIG_KSU_SUSFS 分支） =="
 SH="$FINASU/kernel/feature/selinux_hide.c"
 if [ -f "$SH" ]; then
