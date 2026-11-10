@@ -208,7 +208,11 @@ jobs:
           git config --global user.name "Numbersf"
           git config --global user.email "263623064@qq.com"
           mkdir kernel_workspace && cd kernel_workspace
-          git clone https://github.com/Numbersf/Action-Build.git -b FinaSU
+          # 优先克隆触发本次运行的仓库：FinaSU 分支在 fork 里，上游 Numbersf 尚未合并
+          if ! git clone "https://github.com/${GITHUB_REPOSITORY}.git" -b FinaSU; then
+            rm -rf Action-Build
+            git clone https://github.com/Numbersf/Action-Build.git
+          fi
 
       - name: Extract Manifest Info
         id: extract_info
