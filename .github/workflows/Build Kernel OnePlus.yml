@@ -498,6 +498,26 @@ jobs:
             sed -i 's/if check_defconfig == None:/if False:  # check_defconfig == None:/' kernel_platform/build/kernel/kleaf/common_kernels.bzl
           fi
 
+      - name: Repair awk runtime
+        # 某些 runner 镜像 / APT 缓存恢复后，/usr/bin/awk 会缺 libsigsegv.so.2，
+        # 表现为 `awk: error while loading shared libraries: libsigsegv.so.2`，
+        # 直接打死后续所有用 awk 解析版本号的步骤。这里先自检并就地修复。
+        run: |
+          if echo 1 | awk '{print $1}' >/dev/null 2>&1; then
+            echo "awk 正常：$(command -v awk)"
+          else
+            echo "awk 不可用，尝试修复 libsigsegv2 / gawk / mawk"
+            sudo apt-get update -qq || true
+            sudo apt-get install -y --reinstall libsigsegv2 gawk || true
+            sudo apt-get install -y mawk || true
+            if echo 1 | awk '{print $1}' >/dev/null 2>&1; then
+              echo "修复成功：$(command -v awk)"
+            else
+              echo "::error title=awk 不可用::runner 环境缺少 libsigsegv2，且自动修复失败"
+              exit 1
+            fi
+          fi
+
       - name: Kernel Version Handling
         run: |
           cd kernel_workspace/kernel_platform
