@@ -40,3 +40,39 @@ v1.5.1/master/                    # 用 tag
 3. **Apply Patches FinaSU** —— `10_enable_susfs_for_ksu.patch` 对 FinaSU 新版 `kernel/` 的上下文是否仍匹配（`|| true` 会吞掉失败，看 `check_rejects` 输出）。
 4. **Build Kernel FAST** —— 首次带 `CONFIG_KALLSYMS_ALL=y` / `KSU_REQUIRE_PREINIT=1` 的编译。
 5. **Download Latest FinaSU Manager APK** —— Release 资源名是否仍匹配 `*.apk`。
+
+## 参数清单（Actions → Run workflow 里逐个选）
+
+| 参数 | 类型 | 默认 | 含义 |
+| --- | --- | --- | --- |
+| `FILE` | choice | `oneplus_15` | 机型配置。格式 `机型_变体`，一加 Ace 2 = `oneplus_ace2_b`（`_b` 只是变体后缀，`FILE_CONF` 会剥掉，`FILE_BASE=OnePlusAce2`） |
+| `KSU_META` | string | `master/master/` | `管理器ref/内置ref/回退hash` |
+| `FAST_BUILD` | bool | `true` | 极速构建（走 `Build Kernel FAST`，失败自动回退普通构建） |
+| `KPM` | choice | `KPN` | 内核模块实现：`KPM` 开启 / `KPN` 关闭 / `N/A` 不处理 |
+| `LSM_BBG` | bool | `true` | BBG 关键分区写入保护模块 |
+| `NETFILTER` | bool | `true` | 网络功能扩展（netfilter 相关补丁） |
+| `CCM` | bool | `true` | 拥塞控制 BBRv1+BBRv3+ECN |
+| `DROID_SPACES` | bool | `false` | DroidSpaces 轻量容器支持 |
+| `RE_KERNEL` | bool | `false` | Re-Kernel 补丁 |
+| `LZ4_UPDATE` | bool | `false` | 升级 lz4 到上游最新 |
+| `ZRAM` | string | `0/lz4kd/8589934592` | `开关/算法/大小`，`0` 关闭 |
+| `SUSFS_META` | string | 空 | SUSFS 回退：`hash` / `HEAD~N` 的数字 N / `-1` 关闭 SUSFS |
+| `SUSFS_CI` | choice | `CI` | SUSFS 模块从 CI 还是 Release 拉 |
+| `SUSFS_DEV` | bool | `false` | 用 SUSFS 的 `-dev` 分支 |
+| `SCHED_HMBIRD` | bool | `false` | 风驰调度（HMBIRD）驱动 1.0 |
+| `UNICODE_BYPASS` | bool | `false` | Unicode 不可见码点绕过修复 |
+| `SUFFIX` | string | 空 | 自定义内核后缀（空=RAND_STR，`-1` 关闭） |
+| `RESUBLEVEL` | string | 空 | 内核 SUBLEVEL 欺骗 |
+| `DYNAMIC_REPO` | string | `Numbersf` | 动态清单仓库 owner |
+| `BUILD_TIME` | string | 固定值 | 内核构建时间戳（`F`=当前 UTC，`-1` 关闭） |
+| `SPACE_NOCLEAN` | bool | `false` | 停用空间清扫 |
+| `BUILD_NOCACHE` | bool | `false` | 本次不用缓存 |
+
+### 一加 Ace 2 的常用组合
+
+```
+FILE=oneplus_ace2_b  KSU_META=master/master/  FAST_BUILD=true
+KPM=KPN  LSM_BBG=true  NETFILTER=true  CCM=true
+DROID_SPACES=true  RE_KERNEL=true  LZ4_UPDATE=true
+ZRAM=0/lz4kd/8589934592  SUSFS_META=（空，跟随最新）
+```
