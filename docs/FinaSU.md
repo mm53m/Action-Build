@@ -226,3 +226,37 @@ bash scripts/verify-susfs-selinux.sh <内核根或 kernel_platform> <FinaSU 目�
 | 修复 | 新增步骤 `Enable Dual-Policy SELinux Hide` → `scripts/patch-selinux-hide-dual-policy.py`，把三个外壳函数体改成委托 `my_write_context` / `my_write_access` / `my_setprocattr` |
 | 断言 | `scripts/verify-susfs-selinux.sh` §1b：三处必须含委托、不得残留 `susfs_security_*` live-policy 调用 |
 | 不改动 | 门控、SUSFS 全部功能、FinaSU 源码、`KSU_META`/`SUSFS_META` 语义 |
+
+### SUSFS 2.4 原生注册（2026-11-10 上游更新后的形态）
+
+FinaSU 在 `a49dd71e`（2026-11-10 09:31Z）之后改为「驱动主动登记」：注入类型时调
+`susfs_add_sus_type()`，改写 allow 位之前调 `susfs_add_sus_avd_allowed_by_type()`
+登记注入前的向量表；SUSFS 的查询钩子据此把 sus 类型判为不存在、把 `allowed` 位
+还原成注入前，三条 oracle 天然看不到 `ksu_file` / `su`。同一批提交还做了：
+
+| 上游提交 | 变化 | 对本项目的影响 |
+| --- | --- | --- |
+| `a49dd71e` | 注册注入类型与注入前 allow 向量表 | 不再需要双策略委托 |
+| `d0c9daaa` / `20836408` | 文档记录 SUSFS 2.3 链接失败；上游 pin 移到 v2.4.0 | 我们已 pin `5436438b`（`SUSFS_VERSION "v2.4.0"`），无需改 |
+| `3d38b210` | 新增 `KSU_SUSFS_PRIORITY_UID_FILTER` Kconfig（default y） | 配置里显式写 y，并在符号存在时断言 |
+| `9ee76f81` | Kbuild 编译期探测 `fs/susfs.c` 是否有 `susfs_add_sus_type`，有则 `-DKSU_SUSFS_HAS_TYPE_REGISTRATION=1` | 校验器改为检查探测行与宏 |
+| `67a56dc2` | 注册模式下 `latest_granting` 不再 +1，`avc_ss_reset` 用 seqno 0 | 校验器断言 `reset_avc_cache(0)` 与 `!defined(KSU_SUSFS_HAS_TYPE_REGISTRATION)` |
+
+因此 `scripts/patch-selinux-hide-dual-policy.py` 改为**双模式**：
+
+1. **原生注册模式**（`fs/susfs.c` 有 `susfs_add_sus_type` + FinaSU `sepolicy.c` 有注册调用点 + `Kbuild` 有 `SUSFS_REGISTRATION_PROBE`）：
+   什么都不改，钩子保持 SUSFS 自己的实现 —— 这正是上游设计，`my_write_context` 等
+   在 `CONFIG_KSU_SUSFS` 下仍编译但不安装，避免与注册语义打架（`latest_granting`
+   不递增、`reset_avc_cache(0)`）。
+2. **旧补丁模式**（任一条件缺失）：回退到双策略委托，行为与上一版一致。
+
+对应该步骤在 workflow 里改名为
+`Adapt SELinux Hiding (SUSFS 2.4 native registration, legacy fallback)`；
+`verify-susfs-selinux.sh` §1b 同步按模式分叉：
+
+- 注册模式断言：`fs/susfs.c` 两个注册入口、`Kbuild` 探测 + 宏、`sepolicy.c` 两处调用点、
+  `rules.c` 的 `latest_granting` 门控与 `reset_avc_cache(0)`、`selinuxfs.c` 仍走
+  `susfs_security_context_to_sid` / `susfs_security_compute_av_user`、`services.c` 的
+  `susfs_is_sus_type_rcu` / `susfs_spoof_avd_allowed_rcu`，并**反向断言**没有注入
+  `my_write_context` / `my_setprocattr`。
+- 旧补丁模式断言：三处委托 + 不得残留 live-policy 调用（原 §1b 逻辑）。
