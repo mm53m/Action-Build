@@ -29,6 +29,9 @@ echo "== 1. SUSFS 内核侧（50_add 主补丁）SELinux 钩子 =="
 need_grep() { # file pattern desc
   if grep -qE "$2" "$1" 2>/dev/null; then ok "$3"; else err "$3 缺失（$1 未匹配 /$2/）"; fi
 }
+need_fixed() { # file literal desc —— 用于含 ( ) 等 ERE 元字符的字面量
+  if grep -qF -- "$2" "$1" 2>/dev/null; then ok "$3"; else err "$3 缺失（$1 未匹配字面量 \"$2\"）"; fi
+}
 
 # —— 两代补丁共同契约 ——
 need_grep "$COMMON/security/selinux/hooks.c" \
@@ -84,9 +87,10 @@ else
     "services.c: access 查询按原策略回填（隐藏 KSU 注入规则）"
 fi
 
-echo "== 1b. 三条策略 oracle 已委托给双策略实现（backup_sepolicy） =="
-# 只装 SUSFS 的静态钩子时，这三条都按 live policy 回答，App Zygote 域
-# （DirtySepolicy / Duck Detector）能直接问出 ksu_file / su 规则。
+echo "== 1b. 策略 oracle 的隐藏路径（SUSFS 2.4 原生注册 / 双策略委托） =="
+# 三条 oracle：security:check_context（/sys/fs/selinux/context）、
+# security:compute_av（SELinux.checkSELinuxAccess）、process:setcurrent
+# （/proc/self/attr/current），App Zygote 域可以用它们问出注入的 ksu_file / su 规则。
 body_of() { # file func -> 打印函数体（从签名行到行首 } 为止）
   awk -v f="$2" '$0 ~ ("[ \t]" f "\\(") {p=1} p {print} p && /^}$/ {exit}' "$1"
 }
@@ -102,25 +106,51 @@ check_delegated() { # file func callee desc
     err "$4: $2 仍用 live policy 回答（未接入 $3，App Zygote 侧信道可读出 ksu 规则）"
   fi
 }
-if ! grep -q 'susfs_sel_write_context' "$COMMON/security/selinux/selinuxfs.c" 2>/dev/null; then
+
+NATIVE_SUSFS=0
+if grep -qs 'susfs_add_sus_type' "$COMMON/fs/susfs.c" 2>/dev/null \
+   && grep -qs 'KSU_SUSFS_HAS_TYPE_REGISTRATION' "$FINASU/kernel/selinux/sepolicy.c" 2>/dev/null; then
+  NATIVE_SUSFS=1
+fi
+
+if [ "$NATIVE_SUSFS" = 1 ]; then
+  echo "  .. 检测到 SUSFS 2.4 原生注册形态：查询侧由 SUSFS 自己的钩子回答"
+  need_grep "$COMMON/fs/susfs.c" 'susfs_add_sus_type' "fs/susfs.c: 注入类型注册入口"
+  need_grep "$COMMON/fs/susfs.c" 'susfs_add_sus_avd_allowed_by_type' "fs/susfs.c: 注入前 allow 向量表注册入口"
+  need_grep "$FINASU/kernel/Kbuild" 'SUSFS_REGISTRATION_PROBE' "Kbuild: 编译期探测注册入口"
+  need_grep "$FINASU/kernel/Kbuild" 'KSU_SUSFS_HAS_TYPE_REGISTRATION=1' "Kbuild: 定义注册宏"
+  need_grep "$FINASU/kernel/selinux/sepolicy.c" 'susfs_add_sus_type' "sepolicy.c: 注入类型后登记"
+  need_grep "$FINASU/kernel/selinux/sepolicy.c" 'susfs_add_sus_avd_allowed_by_type' "sepolicy.c: 改写 allow 前登记原始向量"
+  need_fixed "$FINASU/kernel/selinux/rules.c" '!defined(KSU_SUSFS_HAS_TYPE_REGISTRATION)' "rules.c: 注册模式下不递增 latest_granting"
+  need_fixed "$FINASU/kernel/selinux/rules.c" 'reset_avc_cache(0)' "rules.c: 注册模式下用 seqno 0 重置 avc"
+  need_grep "$COMMON/security/selinux/selinuxfs.c" 'susfs_security_context_to_sid' "selinuxfs.c: context 查询仍走 SUSFS 钩子"
+  need_grep "$COMMON/security/selinux/selinuxfs.c" 'susfs_security_compute_av_user' "selinuxfs.c: access 查询仍走 SUSFS 钩子"
+  need_grep "$COMMON/security/selinux/ss/services.c" 'susfs_is_sus_type_rcu' "services.c: sus 类型判定"
+  need_grep "$COMMON/security/selinux/ss/services.c" 'susfs_spoof_avd_allowed_rcu' "services.c: allowed 位还原"
+  if grep -qs 'my_write_context\|my_setprocattr' "$COMMON/security/selinux/selinuxfs.c"; then
+    err "selinuxfs.c: 注册形态下不应再注入双策略委托（应保持 SUSFS 原生钩子）"
+  else
+    ok "外壳保持 SUSFS 原生实现（注册形态无需委托）"
+  fi
+elif ! grep -q 'susfs_sel_write_context' "$COMMON/security/selinux/selinuxfs.c" 2>/dev/null; then
   echo "  warn 老形态补丁（my_setprocattr/&fake_state）：外壳直接调用 KSU 双策略，跳过委托检查"
 else
-check_delegated "$COMMON/security/selinux/selinuxfs.c" susfs_sel_write_context my_write_context "check_context oracle"
-check_delegated "$COMMON/security/selinux/selinuxfs.c" susfs_sel_write_access  my_write_access  "compute_av oracle"
-check_delegated "$COMMON/security/selinux/hooks.c"      susfs_selinux_setprocattr my_setprocattr "setcurrent oracle"
+  check_delegated "$COMMON/security/selinux/selinuxfs.c" susfs_sel_write_context my_write_context "check_context oracle"
+  check_delegated "$COMMON/security/selinux/selinuxfs.c" susfs_sel_write_access  my_write_access  "compute_av oracle"
+  check_delegated "$COMMON/security/selinux/hooks.c"      susfs_selinux_setprocattr my_setprocattr "setcurrent oracle"
 
-if body_of "$COMMON/security/selinux/selinuxfs.c" susfs_sel_write_access \
-     | grep -q 'susfs_security_compute_av_user('; then
-  err "selinuxfs.c: susfs_sel_write_access 仍调用 susfs_security_compute_av_user（live policy 泄漏）"
-fi
-if body_of "$COMMON/security/selinux/selinuxfs.c" susfs_sel_write_context \
-     | grep -q 'susfs_security_context_to_sid('; then
-  err "selinuxfs.c: susfs_sel_write_context 仍调用 susfs_security_context_to_sid（live policy 泄漏）"
-fi
-if body_of "$COMMON/security/selinux/hooks.c" susfs_selinux_setprocattr \
-     | grep -q 'susfs_security_context_to_sid('; then
-  err "hooks.c: susfs_selinux_setprocattr 仍调用 susfs_security_context_to_sid（live policy 泄漏）"
-fi
+  if body_of "$COMMON/security/selinux/selinuxfs.c" susfs_sel_write_access \
+       | grep -q 'susfs_security_compute_av_user('; then
+    err "selinuxfs.c: susfs_sel_write_access 仍调用 susfs_security_compute_av_user（live policy 泄漏）"
+  fi
+  if body_of "$COMMON/security/selinux/selinuxfs.c" susfs_sel_write_context \
+       | grep -q 'susfs_security_context_to_sid('; then
+    err "selinuxfs.c: susfs_sel_write_context 仍调用 susfs_security_context_to_sid（live policy 泄漏）"
+  fi
+  if body_of "$COMMON/security/selinux/hooks.c" susfs_selinux_setprocattr \
+       | grep -q 'susfs_security_context_to_sid('; then
+    err "hooks.c: susfs_selinux_setprocattr 仍调用 susfs_security_context_to_sid（live policy 泄漏）"
+  fi
 fi
 
 echo "== 2. FinaSU 驱动侧符号导出（CONFIG_KSU_SUSFS 分支） =="
