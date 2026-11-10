@@ -151,3 +151,55 @@ su -c 'ls -l /data/adb/ksu /data/adb/ksu/.. 2>/dev/null'
 ```
 
 结论：只要 4) 装的是 zip 里的 `FinaSU-Manager.apk`，且内核是按本分支新流程编译的，管理器必然能连上驱动。
+
+## SELinux 完整隐藏 × SUSFS 全功能：为什么能同时成立
+
+曾经以为是"互斥"，实测源码后确认是**上游设计好的分工**（FinaSU `5b83330b`/`cdf8711a`，2026-10-23 起）：
+
+| 能力 | 谁实现 |
+| --- | --- |
+| 伪 `/sys/fs/selinux/status`（`fake_status` 页） | FinaSU 提供页，SUSFS `50_add` 主补丁接管 `sel_open_handle_status` |
+| `/sys/fs/selinux/context`、`access` 按**原始策略**解析 | SUSFS 补丁内联（`handle_sel_write_context` / `handle_sel_write_access`） |
+| `setprocattr` 不暴露 `u:r:su:s0` | SUSFS 补丁替换 `LSM_HOOK_INIT(setprocattr, handle_selinux_setprocattr)` |
+| `setenforce`/`policyload` 不推进可见 `sequence` | SUSFS 补丁改 `security/selinux/status.c` |
+| 双策略 sidtab 同步（KernelSU 注入的 type 在原始策略里不存在时回退） | FinaSU 主体（`backup_sepolicy` + 8 参 `security_context_to_sid_with_policy`） |
+| avc 日志里 `su` 的 tsid 伪装 | SUSFS `avc.c`（`enable_avc_log_spoofing`）+ FinaSU `feature/avc_spoof.c` kprobe，两条可叠加 |
+
+`CONFIG_KSU_SUSFS=y` 时 FinaSU 的 `ksu_selinux_hide_enable()` 直接 `return 0`——它不再自己 patch
+`write_op[]`，因为补丁已经静态改好了。所以**不要**再打 `10_enable_susfs_for_ksu.patch`
+（那个补丁面向上游 KernelSU 的手动钩子模型，会引入未定义符号）。
+
+完整说明见 [SELINUX-SUSFS-COEXIST.md](./SELINUX-SUSFS-COEXIST.md) 与
+[ADAPT-GKI-FinaSU-PARITY.md](./ADAPT-GKI-FinaSU-PARITY.md)。
+
+### 运行时启用顺序（编译不会自动打开）
+
+```bash
+# 1) 管理器里"保存功能"一次，让 KernelSU 生成 backup_sepolicy；然后重启
+# 2) 打开 SELinux 隐藏
+su -c 'ksud feature set selinux_hide 1'
+su -c 'ksud feature get selinux_hide'        # 期望 1
+# 3) 打开 avc 日志伪装（SUSFS 与 FinaSU 两条路径都可叠加）
+su -c 'ksu_susfs enable_avc_log_spoofing 1'
+su -c 'ksud feature set avc_spoof 1'
+# 4) 持久化
+sed -i 's/^avc_log_spoofing=.*/avc_log_spoofing=1/' /data/adb/modules/susfs4ksu/config.sh
+```
+
+`ksud feature set selinux_hide 1` 返回 `-EAGAIN` 表示还没有 `backup_sepolicy`（没做过第 1 步）。
+
+## 构建期防退化：pin + 断言
+
+| 机制 | 位置 | 作用 |
+| --- | --- | --- |
+| SUSFS 提交 pin | `Apply Patches FinaSU`，SUSFS clone 之后 | `SUSFS_META` 为空时 pin 到 `5436438b5cc77f146e04f71070da153dabe17a9d`（2026-11-09，v2.4.0 新形态，与 run 42745210022 成功产物对应）。上游会跟着 KernelSU rebase，`security/selinux/*` hunk 形态一变就会与 FinaSU 导出的 `fake_status` 系列符号对不上。其它 KMI 未验证，保持跟随最新 |
+| 补丁失败即失败 | 同上，`patch -p1 --forward` | 去掉 `|| true`，出现 `Hunk #N FAILED` 或 `.rej` 直接 `exit 1`（原来是静默半应用 → 编译通过但隐藏失效） |
+| 共存契约校验 | `scripts/verify-susfs-selinux.sh`，`Build Kernel FAST` 里 `olddefconfig` 之后 | 同时支持老形态（`my_setprocattr` + `fake_state`）与新形态（`susfs_security_context_to_sid` + `susfs_spoof_avd_allowed_rcu`）；缺任一侧钩子即 `::error::` + 非零退出 |
+| 配置断言 | 同上 | 编译前逐条断言 `CONFIG_KSU`、`CONFIG_KSU_SUSFS`、9 个 `CONFIG_KSU_SUSFS_*`、`SECURITY_SELINUX_DEVELOP` 等真的进了 `out/.config`。`set_config` 是纯文本替换，`olddefconfig` 会静默丢弃依赖不满足的项（本仓库历史上 87 条里曾有 13 条未生效） |
+
+校验器本地用法：
+
+```bash
+bash scripts/verify-susfs-selinux.sh <内核根或 kernel_platform> <FinaSU 目录>
+# 例：bash scripts/verify-susfs-selinux.sh kernel_workspace/kernel_platform kernel_workspace/FinaSU
+```
