@@ -196,3 +196,65 @@ su -c 'dmesg | grep -iE "selinux_hide|avc_log_spoof|fake_status"'
 即：SUSFS 形态把"运行时 patch"换成了"编译期静态表"，因此更稳（不依赖 kallsyms 查找、
 不受 ro_after_init 限制），代价是补丁必须与内核版本严格匹配（这也正是要把
 `susfs4ksu` 分支 pin 到具体 commit 的原因）。
+
+---
+
+## 附：App Zygote 策略 oracle —— “隐藏开着”为什么仍被读出（2026-11 补）
+
+### 通道本身（公开手法）
+
+LSPosed 团队 2024-08 发现、2026-05 因 FldBudin 在 Duck Detector（PR #22）独立复现而公开的实现：`gstjee/DirtySepolicy`。
+普通应用 bind 一个 **App Zygote**（`app_zygote`）服务后，凭 AOSP `private/app_zygote.te` 授予的三条权限查询整张策略：
+
+| oracle | 权限 | 入口 |
+| --- | --- | --- |
+| 类型/域是否存在 | `security:check_context` | 写 `/sys/fs/selinux/context` → 无效 `EINVAL`、有效但无权 `EPERM` |
+| 某条 allow 是否存在 | `security:compute_av` | `SELinux.checkSELinuxAccess()` / 写 `/sys/fs/selinux/access` |
+| 类型是否存在（第二路） | `process:setcurrent` | 写 `/proc/self/attr/current`，同上用 `EINVAL`/`EPERM` 区分 |
+
+`untrusted_app`（Termux 等）没有这三条权限，所以从普通应用 shell 里测只会看到 `Permission denied` —— 这不代表通道不存在。
+
+### 我们的泄漏点
+
+SUSFS `50_add` 补丁把 `write_op[SEL_CONTEXT]`、`write_op[SEL_ACCESS]`、`LSM_HOOK_INIT(setprocattr, …)` 换成自己的外壳，外壳条件是
+`current_uid().val >= 10000 && ksu_selinux_hide_running`，但内部实现用的是 **live policy**：
+
+- `susfs_sel_write_context()` → `susfs_security_context_to_sid(state, …)`（`state->policy`）
+- `susfs_sel_write_access()` → `susfs_security_compute_av_user(state, …)`
+- `susfs_selinux_setprocattr()` → `susfs_security_context_to_sid(&selinux_state, …)`
+
+而 FinaSU 的 `apply_kernelsu_rules()` 已把 `ksu_file`、`su`、`domain→ksu_file`、`su * * *`、以及 “copied from Magisk rules” 的 servicemanager/logd 规则注入 live policy。
+于是 app_zygote 一问就答，检测 App 得到 `selinux_kernelsu: true`、`selinux_magisk: true`、`kernelsu_traits_count: 4`。
+
+FinaSU 在 `CONFIG_KSU_SUSFS=y` 时 `ksu_selinux_hide_enable()` 里 `#ifdef CONFIG_KSU_SUSFS return 0;` 早退，把三条 oracle 让给上面的 SUSFS 外壳，**双策略实现（`my_write_context` / `my_write_access` / `my_setprocattr`，用 `backup_sepolicy` 回答）虽然编译进来却没人调用**。
+
+对比：LKM 模式的 KernelSU 跑在未打 SUSFS 的 stock GKI 上，`selinux_hide` 用运行时 `ksu_patch_text()` 把 `write_op` 两个槽位 + `setprocattr` LSM hook 换成双策略版本，所以“完全拒绝”查询。
+
+### 接线方式（构建期自动完成）
+
+`scripts/patch-selinux-hide-dual-policy.py`（workflow 步骤 `Enable Dual-Policy SELinux Hide`）在 50_add 补丁应用后改写三处函数体：
+
+```c
+susfs_sel_write_context()   -> return my_write_context(file, buf, size);
+susfs_sel_write_access()    -> return my_write_access(file, buf, size);
+susfs_selinux_setprocattr() -> return my_setprocattr(name, value, size);
+```
+
+- 门控留在原外壳里（`uid >= 10000 && ksu_selinux_hide_running`），`ksu_selinux_hide_running=false` 或 `backup_sepolicy` 缺失时行为与原生完全一致；
+- 只替换函数体，保留原签名（含 `static` / `__nocfi`），声明以 `extern` 形式插到签名行之前；
+- SUSFS 的其它功能不受影响：`sus_path`/`sus_mount`/`sus_kstat`/`sus_map`/`open_redirect`/`avc log spoofing`/伪 `status` 页都不走这三个节点；
+- 脚本幂等；锚点缺失、FinaSU 未导出非 static 双策略符号、或改完仍残留 live-policy 调用时 `exit 1`。
+
+构建期断言（`scripts/verify-susfs-selinux.sh` §1b）会再检查一遍：三个函数体必须含委托调用，且不得残留 `susfs_security_context_to_sid(` / `susfs_security_compute_av_user(`。
+
+### 设备侧验证
+
+1. 关/开对比：`su -c '/data/adb/ksu/bin/ksud feature set selinux_hide 0'` → 检测 App 应报 root；`… selinux_hide 1` → 应清零。
+2. 直接看 oracle（需要 app_zygote 域，普通 shell 无效）：装 DirtySepolicy 或任何带 App Zygote 的检测器，期望
+   `kernelsu_traits_count: 0`、`selinux_magisk: false`、`selinux_kernelsu: false`。
+3. 内核日志：`dmesg | grep -i 'selinux_hide'` 应只有 `set to 1` / `init selinux hide`，无 `no backup sepolicy available`。
+
+### 残余风险（都不在 app_zygote 权限范围内）
+
+- `SEL_POLICY`（`/sys/fs/selinux/policy` dump）需要 `security:read_policy`，app_zygote 没有；root 下仍可 dump（注入规则在 live policy 里，这是设计使然，KSU 上游同样如此）。
+- `sel_write_create/relabel/member/validatetrans` 未接管，但分别需要 `security:compute_create` / `compute_relabel` / `compute_member` / `validate_trans`，app_zygote 不持有。
