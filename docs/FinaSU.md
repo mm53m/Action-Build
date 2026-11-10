@@ -203,3 +203,15 @@ sed -i 's/^avc_log_spoofing=.*/avc_log_spoofing=1/' /data/adb/modules/susfs4ksu/
 bash scripts/verify-susfs-selinux.sh <内核根或 kernel_platform> <FinaSU 目录>
 # 例：bash scripts/verify-susfs-selinux.sh kernel_workspace/kernel_platform kernel_workspace/FinaSU
 ```
+
+## 适配后的验证记录
+
+| 项目 | 值 |
+| --- | --- |
+| 首次带防护的构建 | run `42762271509`（失败：校验器把 `backup_sepolicy` 断言错放在内核 `services.c`，误报） |
+| 修正后构建 | run `42763053546`（**成功**，全 57 步绿） |
+| 产物 | `AnyKernel3_FinaSU_33180_OnePlusAce2_Android16.0.0(5.10.236)_BBG_ILH_DS_REKER_LZ4UPD.zip`（46.3 MB，artifact `13739031662`） |
+| 日志证据 | `SUSFS HEAD: 5436438b… KernelSU: Sync with upstream`；`SELinux×SUSFS 共存契约校验通过`；17 条 `ok CONFIG_*`；`-- KernelSU Manager signature size: 0x02cc` / `hash 2d89b50a…` |
+| hook 后端 | Tracepoint（`warn`，未开 Inline） |
+
+刷机后按上文「运行时启用顺序」打开 `selinux_hide` 与 `avc_log_spoofing` 即可验证隐藏是否生效。
